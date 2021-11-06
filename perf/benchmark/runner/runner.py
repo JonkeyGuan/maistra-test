@@ -32,9 +32,7 @@ import yaml
 from fortio import METRICS_START_SKIP_DURATION, METRICS_END_SKIP_DURATION
 
 NAMESPACE = os.environ.get("NAMESPACE", "twopods-istio")
-NIGHTHAWK_GRPC_SERVICE_PORT_FORWARD = 9999
 POD = collections.namedtuple('Pod', ['name', 'namespace', 'ip', 'labels'])
-NIGHTHAWK_DOCKER_IMAGE = "envoyproxy/nighthawk-dev:59683b759eb8f8bd8cce282795c08f9e2b3313d4"
 processes = []
 
 
@@ -168,11 +166,8 @@ class Fortio:
             elif self.protocol_mode == "tcp":
                 basestr = "{protocol}://{svc}:{port}"
             return basestr.format(svc=svc, port=self.ports[self.protocol_mode][port_type], size=self.size, protocol=self.get_protocol_uri_fragment())
-        elif self.load_gen_type == "nighthawk":
-            return "{protocol}://{svc}:{port}/".format(
-                svc=svc, port=self.ports[self.protocol_mode][port_type], protocol=self.get_protocol_uri_fragment())
         else:
-            sys.exit("invalid load generator %s, must be fortio or nighthawk", self.load_gen_type)
+            sys.exit("invalid load generator %s, must be fortio", self.load_gen_type)
 
     # Baseline is no sidecar mode
     def baseline(self, load_gen_cmd, sidecar_mode):
@@ -202,12 +197,6 @@ class Fortio:
         if load_gen_type == "fortio":
             p = multiprocessing.Process(target=kubectl_exec,
                                         args=[self.client.name, sidecar_mode_func(load_gen_cmd, sidecar_mode)])
-            p.start()
-            processes.append(p)
-        elif load_gen_type == "nighthawk":
-            p = multiprocessing.Process(target=run_nighthawk,
-                                        args=[self.client.name, sidecar_mode_func(load_gen_cmd, sidecar_mode),
-                                              labels + "_" + sidecar_mode])
             p.start()
             processes.append(p)
 
@@ -267,54 +256,6 @@ class Fortio:
 
         return fortio_cmd
 
-    def generate_nighthawk_cmd(self, cpus, conn, qps, jitter_uniform, duration, labels):
-        labels = "nighthawk_" + labels
-        nighthawk_args = [
-            "nighthawk_client",
-            "--concurrency {cpus}",
-            "--output-format json",
-            "--prefetch-connections",
-            "--open-loop",
-            "--experimental-h1-connection-reuse-strategy lru",
-            "--experimental-h2-use-multiple-connections",
-            "--connections {conn}",
-            "--rps {qps}",
-            "--duration {duration}",
-            "--request-header \"x-nighthawk-test-server-config: {{response_body_size:{size}}}\""
-        ]
-
-        if jitter_uniform:
-            nighthawk_args.append("--jitter-uniform {jitter_uniform}s")
-
-        # Our "gRPC" mode actually means:
-        #  - https (see get_protocol_uri_fragment())
-        #  - h2
-        #  - with long running connections
-        #  - Also transfer request body sized according to "size".
-        if self.protocol_mode == "grpc":
-            nighthawk_args.append("--h2")
-            if self.size:
-                nighthawk_args.append(
-                    "--request-header \"content-length: {size}\"")
-
-        # Note: Labels is the last arg, and there's stuff depending on that.
-        # watch out when moving it.
-        nighthawk_args.append("--label {labels}")
-
-        # As the worker count acts as a multiplier, we divide by qps/conn by the number of cpu's to spread load across
-        # the workers so the sum of the workers will target the global qps/connection levels.
-        nighthawk_cmd = " ".join(nighthawk_args).format(
-            conn=round(conn / cpus),
-            qps=round(qps / cpus),
-            duration=duration,
-            jitter_uniform=jitter_uniform,
-            labels=labels,
-            size=self.size,
-            cpus=cpus,
-            port_forward=NIGHTHAWK_GRPC_SERVICE_PORT_FORWARD)
-
-        return nighthawk_cmd
-
     def run(self, headers, conn, qps, size, duration):
         labels = self.generate_test_labels(conn, qps, size)
 
@@ -331,22 +272,6 @@ class Fortio:
         load_gen_cmd = ""
         if self.load_gen_type == "fortio":
             load_gen_cmd = self.generate_fortio_cmd(headers_cmd, conn, qps, duration, grpc, cacert_arg, self.jitter, labels)
-        elif self.load_gen_type == "nighthawk":
-            # TODO(oschaaf): Figure out how to best determine the right concurrency for Nighthawk.
-            # Results seem to get very noisy as the number of workers increases, are the clients
-            # and running on separate sets of vCPU cores? nproc yields the same concurrency as goprocs
-            # use with the Fortio version.
-            # client_cpus = int(run_command_sync(
-            #     "kubectl exec -n \"{ns}\" svc/fortioclient -c shell nproc".format(ns=NAMESPACE)))
-            # print("Client pod has {client_cpus} cpus".format(client_cpus=client_cpus))
-
-            # See the comment above, we restrict execution to a single nighthawk worker for
-            # now to avoid noise.
-            workers = 1
-            jitter_uniform = None
-            if self.jitter and qps > 0:
-                jitter_uniform = f"{float(0.1 * 1 / qps):.9f}"  # suppress scientific notation
-            load_gen_cmd = self.generate_nighthawk_cmd(workers, conn, qps, jitter_uniform, duration, labels)
 
         if self.run_baseline:
             perf_label = "baseline_perf"
@@ -384,13 +309,13 @@ class Fortio:
             p.start()
             processes.append(p)
 
-            if self.perf_record:
-                run_perf(
-                    self.mesh,
-                    self.server.name,
-                    labels + perf_label,
-                    duration=self.duration,
-                    frequency=self.frequency)
+            #if self.perf_record:
+                #run_perf(
+                #    self.mesh,
+                #    self.server.name,
+                #    labels + perf_label,
+                #    duration=self.duration,
+                #    frequency=self.frequency)
 
             for process in processes:
                 process.join()
@@ -458,13 +383,6 @@ def fortio_from_config_file(args):
         return fortio
 
 
-def can_connect_to_nighthawk_service():
-    # TODO(oschaaf): re-instate going through the gRPC service.
-    return True
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        return sock.connect_ex(('127.0.0.1', NIGHTHAWK_GRPC_SERVICE_PORT_FORWARD)) == 0
-
-
 def run_perf_test(args):
     min_duration = METRICS_START_SKIP_DURATION + METRICS_END_SKIP_DURATION
 
@@ -499,25 +417,6 @@ def run_perf_test(args):
 
     port_forward_process = None
 
-    if args.load_gen_type == "nighthawk":
-        # Create a port_forward for accessing nighthawk_service.
-        if not can_connect_to_nighthawk_service():
-            popen_cmd = "kubectl -n \"{ns}\" port-forward svc/fortioclient {port}:9999".format(
-                ns=NAMESPACE,
-                port=NIGHTHAWK_GRPC_SERVICE_PORT_FORWARD)
-            port_forward_process = subprocess.Popen(shlex.split(
-                popen_cmd), stdout=subprocess.PIPE)
-            max_tries = 10
-            while max_tries > 0 and not can_connect_to_nighthawk_service():
-                time.sleep(0.5)
-                max_tries = max_tries - 1
-
-        if not can_connect_to_nighthawk_service():
-            print("Failure connecting to nighthawk_service")
-            sys.exit(-1)
-        else:
-            print("Able to connect to nighthawk_service, proceeding")
-
     try:
         for conn in fortio.conn:
             for qps in fortio.qps:
@@ -526,53 +425,6 @@ def run_perf_test(args):
     finally:
         if port_forward_process is not None:
             port_forward_process.kill()
-
-
-def run_nighthawk(pod, remote_cmd, labels):
-    kube_cmd = "kubectl --namespace {namespace} exec {pod} -c captured -- {remote_cmd}".format(
-        pod=pod,
-        remote_cmd=remote_cmd,
-        namespace=NAMESPACE)
-    print("nighthawk commandline: " + kube_cmd)
-    process = subprocess.Popen(shlex.split(kube_cmd), stdout=subprocess.PIPE)
-    (output, err) = process.communicate()
-    exit_code = process.wait()
-
-    if exit_code == 0:
-        with tempfile.NamedTemporaryFile(dir='/tmp', delete=True) as tmpfile:
-            dest = tmpfile.name
-            with open("%s.json" % dest, 'wb') as f:
-                f.write(output)
-            print("Dumped Nighthawk's json to {dest}".format(dest=dest))
-
-            # Send human readable output to the command line.
-            os.system(
-                "cat {dest}.json | docker run -i --rm {docker_image} "
-                "nighthawk_output_transform --output-format human".format(docker_image=NIGHTHAWK_DOCKER_IMAGE,
-                                                                          dest=dest))
-            # Transform to Fortio's reporting server json format
-            os.system("cat {dest}.json | docker run -i --rm {docker_image} "
-                      "nighthawk_output_transform --output-format "
-                      "fortio > {dest}.fortio.json".format(dest=dest, docker_image=NIGHTHAWK_DOCKER_IMAGE))
-            # Copy to the Fortio report server data directory.
-            # TODO(oschaaf): We output the global aggregated statistics here of request_to_response,
-            #  which excludes connection set up time.
-            # It would be nice to dump a series instead, as we have more details available in the Nighthawk json:
-            # - queue/connect time
-            # - time spend blocking in closed loop mode
-            # - initiation time to completion (spanning the complete lifetime of a request/reply,
-            # including queue/connect time)
-            # - per worker output may sometimes help interpret plots that don't have a nice knee-shaped shape.
-            kubectl_cp("{dest}.fortio.json".format(
-                dest=dest),
-                "{pod}:/var/lib/fortio/{datetime}_nighthawk_{labels}.json".format(pod=pod, labels=labels, datetime=time.strftime("%Y-%m-%d-%H%M%S")), "shell")
-    else:
-        print("nighthawk remote execution error: %s" % exit_code)
-        if output:
-            print("--> stdout: %s" % output.decode("utf-8"))
-        if err:
-            print("--> stderr: %s" % err.decode("utf-8"))
-
 
 def csv_to_int(s):
     return [int(i) for i in s.split(",")]
@@ -651,7 +503,7 @@ def get_parser():
         default=False)
     parser.add_argument(
         "--load_gen_type",
-        help="fortio or nighthawk",
+        help="fortio only please",
         default="fortio",
     )
 

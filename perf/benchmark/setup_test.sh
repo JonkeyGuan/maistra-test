@@ -16,28 +16,20 @@
 
 set -x
 set -e
-# shellcheck disable=SC2086
 WD=$(dirname $0)
-# shellcheck disable=SC2164
 WD=$(cd "${WD}"; pwd)
-# shellcheck disable=SC2164
 cd "${WD}"
 
-NAMESPACE="${NAMESPACE:-twopods}"
-LOAD_GEN_TYPE="${LOAD_GEN_TYPE:-fortio}"
-DNS_DOMAIN=${DNS_DOMAIN:?"DNS_DOMAIN should be like v104.qualistio.org or local"}
+NAMESPACE="${NAMESPACE:-twopods-istio}"
+DNS_DOMAIN=${DNS_DOMAIN:?"DNS_DOMAIN should be like istio-system.apps.ocp1.example.com"}
 TMPDIR=${TMPDIR:-${WD}/tmp}
-RBAC_ENABLED="false"
 SERVER_REPLICA="${SERVER_REPLICA:-1}"
 CLIENT_REPLICA="${CLIENT_REPLICA:-1}"
 ISTIO_INJECT="${ISTIO_INJECT:-false}"
-LINKERD_INJECT="${LINKERD_INJECT:-disabled}"
 INTERCEPTION_MODE="${INTERCEPTION_MODE:-REDIRECT}"
-echo "linkerd inject is ${LINKERD_INJECT}"
 
 mkdir -p "${TMPDIR}"
 
-# Get pod ip range, there must be a better way, but this works.
 function pod_ip_range() {
     kubectl get network.config/cluster -o yaml | grep -m 1 -A 1 " clusterNetwork" | grep "-" | awk '{print  $3}'
 }
@@ -47,11 +39,8 @@ function svc_ip_range() {
 }
 
 function run_test() {
-  # shellcheck disable=SC2046
   helm -n "${NAMESPACE}" template \
-      --set rbac.enabled="${RBAC_ENABLED}" \
       --set namespace="${NAMESPACE}" \
-      --set loadGenType="${LOAD_GEN_TYPE}" \
       --set excludeOutboundIPRanges=$(pod_ip_range)\
       --set includeOutboundIPRanges=$(svc_ip_range) \
       --set server.replica="${SERVER_REPLICA}" \
@@ -66,31 +55,12 @@ function run_test() {
           . > "${TMPDIR}/${NAMESPACE}.yaml"
   echo "Wrote file ${TMPDIR}/${NAMESPACE}.yaml"
 
-  # remove stdio rules
   kubectl apply -n "${NAMESPACE}" -f "${TMPDIR}/${NAMESPACE}.yaml" || true
   kubectl rollout status deployment fortioclient -n "${NAMESPACE}" --timeout=5m
   kubectl rollout status deployment fortioserver -n "${NAMESPACE}" --timeout=5m
   echo "${TMPDIR}/${NAMESPACE}.yaml"
 }
 
-for ((i=1; i<=$#; i++)); do
-    case ${!i} in
-        -r|--rbac) ((i++)); RBAC_ENABLED="true"
-        continue
-        ;;
-    esac
-done
-
 kubectl create ns "${NAMESPACE}" || true
-
-#if [[ "$ISTIO_INJECT" == "true" ]]
-#then
-#  kubectl label namespace "${NAMESPACE}" istio-injection=enabled --overwrite || true
-#fi
-#
-#if [[ "$LINKERD_INJECT" == "enabled" ]]
-#then
-#  kubectl annotate namespace "${NAMESPACE}" linkerd.io/inject=enabled || true
-#fi
 
 run_test
