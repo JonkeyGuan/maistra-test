@@ -1,0 +1,27 @@
+
+
+export NAMESPACE=twopods-istio
+export INTERCEPTION_MODE=REDIRECT
+export ISTIO_INJECT=true
+export LOAD_GEN_TYPE=fortio
+export DNS_DOMAIN=istio-system.apps.ocp1.example.com
+./setup_test.sh
+
+
+python runner/runner.py --config_file ./configs/istio/telemetryv2_stats/latency.yaml
+
+
+export CSV_OUTPUT="$(mktemp /tmp/benchmark_XXXX.csv)"
+
+export FORTIO_CLIENT_URL=http://fortioclient.istio-system.apps.ocp1.example.com
+
+export PROMETHEUS_URL=https://prometheus-k8s-openshift-monitoring.apps.ocp1.example.com
+export PROMETHEUS_TOKEN=$(oc whoami -t)
+
+pipenv run python3 runner/fortio.py ${FORTIO_CLIENT_URL} --csv_output="$CSV_OUTPUT" --prometheus=${PROMETHEUS_URL} --prometheus_token=${PROMETHEUS_TOKEN} \
+   --csv StartTime,ActualDuration,Labels,NumThreads,ActualQPS,p50,p90,p99,p999,cpu_mili_avg_istio_proxy_fortioclient,cpu_mili_avg_istio_proxy_fortioserver,cpu_mili_avg_istio_proxy_istio-ingressgateway,mem_Mi_avg_istio_proxy_fortioclient,mem_Mi_avg_istio_proxy_fortioserver,mem_Mi_avg_istio_proxy_istio-ingressgateway
+
+pip install pandas
+pip install matplotlib
+
+python3 graph_plotter/graph_plotter.py --graph_type=latency-p50 --x_axis=conn --telemetry_modes=none_mtls_baseline,none_mtls_both,v2-sd-full-nullvm_both,v2-stats-nullvm_both --query_list=2,4 --query_str=ActualQPS==1000 --csv_filepath=/tmp/benchmark_XXXX.csv --graph_title=/tmp/plotter_output.png
