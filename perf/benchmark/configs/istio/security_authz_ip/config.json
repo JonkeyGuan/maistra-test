@@ -1,0 +1,7 @@
+{
+    "authZ":
+    {
+        "numPolicies": 1,
+        "numSourceIP":1000
+    }
+}
